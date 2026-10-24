@@ -1,89 +1,121 @@
-# خضارنا — النسخة الكاملة للتهيئة والنشر
+/* خضارنا — تسجيل الدخول وإنشاء الحساب (Supabase Auth) */
+const cfg=window.KHUDARNA_CONFIG||{};
+const $=id=>document.getElementById(id);
+const configured=!!(window.supabase&&cfg.SUPABASE_URL&&cfg.SUPABASE_ANON_KEY&&!cfg.SUPABASE_URL.includes('YOUR_')&&!cfg.SUPABASE_ANON_KEY.includes('YOUR_'));
+const sb=configured?window.supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_ANON_KEY):null;
+const recovering=/type=recovery/.test(location.hash);
+const home=()=>new URL('index.html',location.href).href;
 
-المشروع لمتجر واحد لبيع الخضروات والفواكه في الناصرية، ذي قار. الدفع نقداً عند الاستلام، وأجرة التوصيل تختلف حسب المنطقة.
+/* ---------- رسائل ---------- */
+function msg(kind,text){const m=$('msg');m.hidden=false;m.className='amsg '+kind;m.textContent=text;m.style.animation='none';void m.offsetWidth;m.style.animation=''}
+function clearMsg(){$('msg').hidden=true}
+const ERR=[
+  [/invalid login credentials/i,'البريد الإلكتروني أو كلمة المرور غير صحيحة.'],
+  [/email not confirmed/i,'لم يتم تأكيد بريدك بعد. افتح رسالة التأكيد على بريدك ثم سجّل دخولك.'],
+  [/already registered|already been registered|user already/i,'هذا البريد مسجّل مسبقاً. جرّب تسجيل الدخول.'],
+  [/password should be at least|weak password|password.*characters/i,'كلمة المرور ضعيفة. استخدم 8 أحرف على الأقل.'],
+  [/rate limit|too many|security purposes/i,'محاولات كثيرة. انتظر دقيقة ثم أعد المحاولة.'],
+  [/invalid.*email|unable to validate email/i,'صيغة البريد الإلكتروني غير صحيحة.'],
+  [/signups? not allowed|signup.*disabled/i,'إنشاء الحسابات الجديدة متوقف حالياً.'],
+  [/same password|different from the old/i,'اختر كلمة مرور مختلفة عن القديمة.'],
+  [/network|failed to fetch/i,'تعذر الاتصال بالإنترنت. تحقق من الشبكة وأعد المحاولة.']
+];
+const ar=e=>{const t=String(e&&e.message||e||'');const hit=ERR.find(([r])=>r.test(t));if(hit)return hit[1];const code=e&&(e.code||e.status||e.name)||'';return 'حدث خطأ غير متوقع'+(code?' ('+code+')':'')+(t?': '+t.slice(0,160):'')+'. أعد المحاولة.'};
 
-## محتويات المشروع
-- `index.html`, `styles.css`, `app.js`: متجر الزبائن وسلة المشتريات وإرسال الطلب عبر Edge Function.
-- `admin.html`, `admin.js`: دخول الإدارة، إدارة المنتجات ومناطق التوصيل والطلبات.
-- `courier.html`, `courier.js`: واجهة دخول المندوب والطلبات المسندة إليه.
-- `config.js`: رابط Supabase ومفتاح anon/publishable ورقم المتجر.
-- `supabase/schema.sql`: جداول، بيانات أولية، وفهارس وسياسات RLS.
-- `supabase/functions/*`: وظائف خادمية لإنشاء الطلب وتحديث الحالة وإنشاء حساب مندوب.
-- `supabase/config.toml`: إعدادات نشر الوظائف.
+/* ---------- التبديل بين الواجهات ---------- */
+const VIEWS={login:'loginForm',signup:'signupForm',reset:'resetForm',newpass:'newPassForm'};
+function view(name){
+  clearMsg();
+  Object.entries(VIEWS).forEach(([k,id])=>{const f=$(id);const on=k===name;f.classList.toggle('hidden',!on)});
+  const tabs=$('tabs');
+  tabs.hidden=!(name==='login'||name==='signup');
+  if(name==='login'||name==='signup'){tabs.dataset.on=name;tabs.querySelectorAll('button').forEach(b=>{const on=b.dataset.t===name;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)})}
+  const first=$(VIEWS[name]).querySelector('input');if(first&&matchMedia('(pointer:fine)').matches)setTimeout(()=>first.focus(),60);
+}
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-t]');if(b)view(b.dataset.t)});
+document.addEventListener('click',e=>{const b=e.target.closest('[data-go]');if(b)view(b.dataset.go)});
 
-## أولا: إعداد Supabase
+/* إظهار/إخفاء كلمة المرور */
+document.querySelectorAll('.eye').forEach(b=>b.addEventListener('click',()=>{const i=b.parentElement.querySelector('input');const show=i.type==='password';i.type=show?'text':'password';b.textContent=show?'🙈':'👁'}));
 
-**تحديث قاعدة البيانات:** قبل التنفيذ خذ نسخة احتياطية من قاعدة البيانات. افتح `supabase/schema.sql`، انسخ محتواه إلى Supabase Dashboard > SQL Editor ثم شغّله. السكربت يستخدم إنشاء الجداول عند عدم وجودها وإضافة أعمدة/سياسات بصورة آمنة قدر الإمكان، ولا يحتوي على أوامر `DROP TABLE`، لكنه لا يغني عن النسخة الاحتياطية أو مراجعة أي خطأ يظهر.
+/* مؤشر قوة كلمة المرور */
+$('sp').addEventListener('input',e=>{
+  const v=e.target.value;let s=0;
+  if(v.length>=8)s++;if(v.length>=12)s++;if(/[A-Za-z]/.test(v)&&/\d/.test(v))s++;if(/[^A-Za-z0-9]/.test(v)||(/[a-z]/.test(v)&&/[A-Z]/.test(v)))s++;
+  const m=document.querySelector('.meter');m.dataset.s=v?Math.max(1,s):0;
+  $('meterTxt').textContent=!v?'8 أحرف على الأقل، والأفضل أرقام وحروف معاً.':['','ضعيفة','مقبولة','جيدة','قوية 💪'][Math.max(1,s)];
+});
 
-1. المشروع مضبوط على رابط Supabase الذي زوّدتني به ومفتاح Publishable داخل `config.js`.
-2. فعّل Data API وتأكد من أسماء الجداول والأعمدة الموجودة قبل الإطلاق؛ إذا كانت لديك بنية مختلفة تماماً فقد تحتاج إلى ترحيل مخصص.
-3. `config.js` يحتوي على المفتاح العام فقط؛ لا تضع `sb_secret` أو `service_role` في ملفات الواجهة. أضف رقم هاتف المتجر إلى `STORE_PHONE` قبل النشر.
-4. من Authentication أنشئ مستخدم الإدارة ببريد وكلمة مرور قوية.
-5. من SQL Editor، بعد استبدال `ADMIN_AUTH_USER_UUID` بمعرّف المستخدم من Authentication > Users، شغّل:
-   ```sql
-   insert into public.kh_profiles (id, full_name, role, active)
-   values ('ADMIN_AUTH_USER_UUID', 'مدير خضارنا', 'admin', true)
-   on conflict (id) do update set role='admin', active=true;
-   ```
-   لا تضع UUID بين أقواس زاوية؛ استخدم UUID الحقيقي.
-7. سجّل الدخول إلى `admin.html` وأضف مناطق الناصرية وأجور التوصيل الفعلية. الأسعار الموجودة تجريبية ويجب مراجعتها.
-8. أضف حساب المندوب باستخدام وظيفة `create-profile` بعد نشرها، أو أنشئ Auth user ثم أضف سجل `profiles` بدور `courier` من أداة موثوقة. لا تمنح حساب مندوب دور admin.
+/* ---------- أدوات النماذج ---------- */
+function busy(btn,on,label){btn.disabled=on;if(on){btn.dataset.l=btn.textContent;btn.textContent=label;btn.classList.add('loading')}else{btn.textContent=btn.dataset.l||btn.textContent;btn.classList.remove('loading')}}
+function shake(el){const f=el.closest('.aform');f.classList.remove('shake');void f.offsetWidth;f.classList.add('shake')}
+function bad(input,text){msg('err',text);shake(input);input.focus();input.classList.add('invalid');input.addEventListener('input',()=>input.classList.remove('invalid'),{once:true})}
+function needBackend(){if(sb)return false;msg('err','الاتصال بالخادم غير مُعدّ بعد. أكمل إعداد config.js وربط Supabase.');return true}
+function success(text){msg('ok',text)}
 
-## ثانياً: نشر Edge Functions
-ثبّت Supabase CLI وسجّل الدخول واربط المشروع:
-```bash
-supabase login
-supabase link --project-ref YOUR_PROJECT_REF
-supabase functions deploy create-order
-supabase functions deploy admin-update-order
-supabase functions deploy create-profile
-```
-وظيفة `create-order` تحتاج وصولاً خادمياً إلى `SUPABASE_SERVICE_ROLE_KEY` من بيئة Supabase. لا تنسخ هذا المفتاح إلى `config.js` أو أي ملف في الواجهة. في مشاريع Supabase تُتاح متغيرات البيئة الأساسية للوظائف؛ راجع إعدادات أسرار الوظائف في مشروعك إذا اختلفت بيئتك.
+/* ---------- دخول ---------- */
+$('loginForm').addEventListener('submit',async e=>{
+  e.preventDefault();if(needBackend())return;
+  const f=e.currentTarget,email=f.email.value.trim(),password=f.password.value,btn=f.querySelector('[type=submit]');
+  if(!email||!/^\S+@\S+\.\S+$/.test(email))return bad(f.email,'اكتب بريداً إلكترونياً صحيحاً.');
+  if(!password)return bad(f.password,'اكتب كلمة المرور.');
+  busy(btn,true,'جارٍ الدخول...');
+  const {error}=await sb.auth.signInWithPassword({email,password});
+  if(error){busy(btn,false);msg('err',ar(error));shake(f.password);return}
+  success('تم تسجيل الدخول ✓ جارٍ فتح المتجر...');
+  setTimeout(()=>location.replace(home()),500);
+});
 
-## ثالثاً: النشر على Netlify
-- ارفع محتويات مجلد المشروع إلى GitHub، أو ارفع المجلد/ملف ZIP إلى Netlify Drop.
-- اجعل `index.html` في جذر النشر.
-- تأكد أن الملفات `config.js`, `app.js`, `admin.js`, `courier.js`, `styles.css` مرفوعة أيضاً.
-- اختبر HTTPS، تسجيل دخول الإدارة، إضافة منتج، إضافة منطقة، إنشاء طلب تجريبي، وتحديث حالة الطلب.
+/* ---------- حساب جديد ---------- */
+const phoneOk=p=>/^(\+?964|0)?7\d{9}$/.test(p.replace(/[\s-]/g,''));
+$('signupForm').addEventListener('submit',async e=>{
+  e.preventDefault();if(needBackend())return;
+  const f=e.currentTarget,btn=f.querySelector('[type=submit]');
+  const full_name=f.full_name.value.trim(),phone=f.phone.value.trim(),email=f.email.value.trim(),pw=f.password.value,pw2=f.password2.value;
+  if(full_name.length<3)return bad(f.full_name,'اكتب اسمك الكامل.');
+  if(!phoneOk(phone))return bad(f.phone,'رقم الهاتف غير صحيح. مثال: 07701234567');
+  if(!/^\S+@\S+\.\S+$/.test(email))return bad(f.email,'اكتب بريداً إلكترونياً صحيحاً.');
+  if(pw.length<8)return bad(f.password,'كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
+  if(pw!==pw2)return bad(f.password2,'كلمتا المرور غير متطابقتين.');
+  busy(btn,true,'جارٍ إنشاء الحساب...');
+  const {data,error}=await sb.auth.signUp({email,password:pw,options:{data:{app:'khudarna',full_name,phone:phone.replace(/[\s-]/g,'')},emailRedirectTo:home()}});
+  if(error){busy(btn,false);msg('err',ar(error));return}
+  /* بريد مسجّل مسبقاً: Supabase يرجع مستخدماً بدون هويات عند تفعيل حماية التعداد */
+  if(data.user&&Array.isArray(data.user.identities)&&data.user.identities.length===0){busy(btn,false);msg('err',ar('User already registered'));return}
+  if(data.session){success('تم إنشاء حسابك 🎉 جارٍ فتح المتجر...');FX.confetti&&FX.confetti(30);setTimeout(()=>location.replace(home()),900);return}
+  busy(btn,false);f.reset();
+  view('login');success('تم إنشاء حسابك 🎉 أرسلنا رسالة تأكيد إلى بريدك. افتحها واضغط الرابط، ثم سجّل دخولك.');
+  $('le').value=email;
+});
 
-## تنبيهات قبل الإطلاق الفعلي
-- البيانات والأسعار والمخزون أولية وليست أسعار سوق مؤكدة.
-- يجب إجراء اختبار شامل لسياسات RLS والوظائف قبل استقبال زبائن حقيقيين.
-- وظيفة إنشاء الطلب تتحقق من الأسعار في الخادم، لكن النسخة الحالية لا تخصم المخزون بشكل ذري؛ لمتجر إنتاجي، انقل إنشاء الطلب وعناصره والتحقق/حجز المخزون إلى PostgreSQL RPC واحدة بمعاملة.
-- أضف حماية من الإساءة ومعدل طلبات، تحققاً من رقم الهاتف، سياسة خصوصية وشروط بيع، ونسخاً احتياطية.
-- واجهة المندوب تعرض الطلبات التي تسمح بها RLS فقط. تعيين المندوب للطلب يتم من سجل الإدارة/قاعدة البيانات؛ يمكن إضافة زر تعيين مندوب في مرحلة لاحقة.
-- تم تحديث إعدادات الواجهة محلياً باستخدام رابط مشروع Supabase والمفتاح العام اللذين أرسلتهما. لم يتم تسجيل الدخول إلى حساب Supabase أو نشر الملفات إلى Netlify من هذه الخطوة، لذلك يلزم اختبار الاتصال والصلاحيات ونشر نسخة الملفات إلى الاستضافة.
+/* ---------- استرجاع كلمة المرور ---------- */
+$('resetForm').addEventListener('submit',async e=>{
+  e.preventDefault();if(needBackend())return;
+  const f=e.currentTarget,email=f.email.value.trim(),btn=f.querySelector('[type=submit]');
+  if(!/^\S+@\S+\.\S+$/.test(email))return bad(f.email,'اكتب بريداً إلكترونياً صحيحاً.');
+  busy(btn,true,'جارٍ الإرسال...');
+  const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:new URL('login.html',location.href).href});
+  busy(btn,false);
+  if(error)return msg('err',ar(error));
+  success('إذا كان البريد مسجّلاً سيصلك رابط تعيين كلمة المرور خلال لحظات.');
+});
+$('newPassForm').addEventListener('submit',async e=>{
+  e.preventDefault();if(needBackend())return;
+  const f=e.currentTarget,btn=f.querySelector('[type=submit]');
+  if(f.password.value.length<8)return bad(f.password,'كلمة المرور يجب أن تكون 8 أحرف على الأقل.');
+  busy(btn,true,'جارٍ الحفظ...');
+  const {error}=await sb.auth.updateUser({password:f.password.value});
+  if(error){busy(btn,false);return msg('err',ar(error))}
+  success('تم تغيير كلمة المرور ✓');history.replaceState(null,'',location.pathname);setTimeout(()=>location.replace(home()),700);
+});
 
+/* ---------- البداية ---------- */
+(async function start(){
+  if(!sb){msg('warn','الاتصال بالخادم غير مُعدّ بعد (config.js). يمكنك رؤية التصميم فقط.');return}
+  sb.auth.onAuthStateChange(ev=>{if(ev==='PASSWORD_RECOVERY')view('newpass')});
+  if(recovering){view('newpass');return}
+  const {data:{session}}=await sb.auth.getSession();
+  if(session){location.replace(home());return}
+  if(new URLSearchParams(location.search).get('mode')==='signup')view('signup');
+})();
 
-## تثبيت خضارنا كتطبيق PWA على Android وiPhone
-
-تمت إضافة `manifest.webmanifest` و`service-worker.js` وأيقونات التطبيق و`pwa.js`. انشر محتويات هذا المجلد على استضافة HTTPS (مثل Netlify) مع الحفاظ على الملفات والمسارات كما هي.
-
-- **Android (Chrome):** افتح رابط الموقع ثم اضغط «تثبيت خضارنا» أو من قائمة Chrome اختر «تثبيت التطبيق».
-- **iPhone/iPad (Safari):** افتح الموقع في Safari، اضغط «مشاركة»، ثم «إضافة إلى الشاشة الرئيسية».
-- يجب أن يكون الموقع على HTTPS حتى يعمل Service Worker.
-- الملفات الثابتة يمكن أن تفتح من الذاكرة المؤقتة عند انقطاع الإنترنت، لكن تسجيل الدخول والطلبات والبيانات الحية تحتاج اتصالاً بالإنترنت؛ لم يتم تخزين بيانات Supabase أو بيانات الدخول دون اتصال.
-- تأكد من تطبيق `supabase/schema.sql`/ملف التهيئة في لوحة Supabase وضبط سياسات RLS قبل استقبال طلبات حقيقية.
-
-## التصميم والحركات
-- `styles.css`: كل الألوان والمتغيرات في أعلى الملف تحت `:root` (غيّرها لتغيير هوية المتجر كاملة)، وفيه نسخة الوضع الليلي `[data-theme=dark]`.
-- `fx.js`: المؤثرات المشتركة (الوضع الليلي، ظهور العناصر عند التمرير، تموّج الأزرار، طيران المنتج إلى السلة، قصاصات الاحتفال، عدّاد الأرقام). تحترم إعداد «تقليل الحركة» في الجهاز.
-- `service-worker.js` صار يجلب أحدث نسخة من الإنترنت أولاً (الإصدار v2) حتى يظهر التصميم الجديد مباشرة بعد النشر.
-
-## النشر على GitHub Pages
-المسارات نسبية، فيعمل الموقع من أي مجلد فرعي مثل `https://USERNAME.github.io/REPO/`. أنشئ مستودعاً، ارفع محتويات المجلد في الجذر، ثم Settings > Pages > Deploy from a branch > main / (root).
-
-## تسجيل الدخول وإنشاء حساب للزبائن
-- المتجر (`index.html`) يحوّل تلقائياً إلى `login.html` إذا لم يكن الزبون مسجّلاً. الصفحة فيها: تسجيل دخول، حساب جديد، استرجاع كلمة المرور.
-- الحسابات هي مستخدمو Supabase Auth العاديون (بريد + كلمة مرور). الاسم والهاتف يُحفظان مع الحساب ويُعبّآن تلقائياً في نموذج الطلب. لا حاجة لتغيير قاعدة البيانات، والزبون لا يملك صلاحية إدارة أو مندوب (الصلاحيات من جدول `profiles` فقط).
-- في Supabase: Authentication > Providers > Email تأكد أنه مفعّل. لتجربة أسرع أوقف «Confirm email»، أو اتركه وسيصل الزبون رابط تأكيد.
-- Authentication > URL Configuration: أضف رابط موقعك (مثل `https://USERNAME.github.io/REPO/`) إلى Site URL وRedirect URLs حتى تعمل روابط التأكيد واسترجاع كلمة المرور.
-
-## ملاحظة مهمة: أسماء الجداول تبدأ بـ kh_
-لتفادي التعارض مع أي تطبيق آخر في نفس مشروع Supabase، كل جداول خضارنا ودوالها وأنواعها تبدأ بـ `kh_` (`kh_profiles`, `kh_products`, `kh_orders`, ...). السكربت `supabase/schema.sql` لا يلمس أي جدول آخر.
-لإنشاء حساب الإدارة بعد تنفيذ السكربت:
-```sql
-insert into public.kh_profiles (id, full_name, role, active)
-values ('ADMIN_AUTH_USER_UUID', 'مدير خضارنا', 'admin', true)
-on conflict (id) do update set role='admin', active=true;
-```
